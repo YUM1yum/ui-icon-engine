@@ -1,0 +1,1 @@
+# Stage 2: 방법 C (RoI + Global Fusion)
