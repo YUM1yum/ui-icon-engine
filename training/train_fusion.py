@@ -10,7 +10,6 @@ import os
 from models.fusion_bridge import MultiScaleFusionBridge
 from models.text_decoder import UITextDecoder
 from data.dataset import UIDescriptionDataset, collate_fn
-# tokenizer는 다음 단계에서 만들겠지만, 여기선 import 한다고 가정
 # from data.tokenizer import CustomTokenizer 
 
 # ---------------------------------------------------------
