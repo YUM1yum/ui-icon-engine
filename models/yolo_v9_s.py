@@ -61,11 +61,10 @@ class UltralyticsFeatureExtractor(nn.Module):
         # 1. 기존 features 비우기
         self.features = {}
         
-        # 2. Forward pass (Gradient 계산 안 함)
-        # Ultralytics의 forward는 결과값(Box)을 리턴하지만, 
-        # 그 과정에서 Hook이 작동하여 self.features에 값이 채워집니다.
-        # visualize=False, embed=False 등 옵션은 상황에 맞춰 사용
-        self.model(x, verbose=False, embed=False)
+        # 2. Forward pass
+        # Ultralytics 내부 model(DetectionModel)은 입력 텐서만 받아도 forward가 동작합니다.
+        # (verbose/embed 같은 인자는 YOLO wrapper에서 쓰는 옵션이라 raw model에 주면 에러가 날 수 있습니다.)
+        _ = self.model(x)
         
         # 3. 낚아챈 Feature Map 반환
         p3 = self.features['p3']
@@ -73,6 +72,24 @@ class UltralyticsFeatureExtractor(nn.Module):
         p5 = self.features['p5']
         
         return [p3, p4, p5]
+
+    @torch.no_grad()
+    def predict(self, image_640, conf=0.4):
+        """640x640 이미지( numpy RGB or BGR )에 대해 detection 결과만 반환.
+
+        반환:
+            detections (Tensor): [N, 6] (x1,y1,x2,y2,conf,cls) on CPU
+            results: ultralytics Results 객체(원하면 사용)
+        """
+        results = self.yolo.predict(source=image_640, imgsz=640, conf=conf, verbose=False)
+        if len(results) == 0 or results[0].boxes is None:
+            return torch.zeros((0, 6)), results
+
+        boxes = results[0].boxes.xyxy
+        confs = results[0].boxes.conf.unsqueeze(1)
+        clses = results[0].boxes.cls.unsqueeze(1)
+        det = torch.cat([boxes, confs, clses], dim=1).detach().cpu()
+        return det, results
 
 # --- 테스트 코드 (실행 확인용) ---
 if __name__ == "__main__":

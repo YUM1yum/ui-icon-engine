@@ -5,7 +5,7 @@ from torchvision.ops import roi_align
 
 class MultiScaleFusionBridge(nn.Module):
     def __init__(self, 
-                 in_channels_list=[256, 512, 1024], # YOLOv9-S 기준 (P3, P4, P5)
+                 in_channels_list=None,             # (선택) [C3, C4, C5]. None이면 LazyConv로 자동 추론
                  decoder_dim=512,                   # 디코더 입력 차원
                  roi_resolution=7):                 # RoI 풀링 크기 (7x7)
         super().__init__()
@@ -14,10 +14,20 @@ class MultiScaleFusionBridge(nn.Module):
         
         # 1. Channel Projection (차원 축소 및 통일)
         # 연산량 감소를 위해 RoI Align 전에 채널을 먼저 256 등으로 줄입니다.
+        #
+        # NOTE:
+        # - Ultralytics/YOLOv9 계열은 모델 사이즈/구성에 따라 P3/P4/P5 채널이 달라질 수 있습니다.
+        # - 추론 파이프라인을 "먼저 돌아가게" 만드는 것이 목표이므로,
+        #   기본은 LazyConv2d로 채널 수를 자동 추론합니다.
         reduced_dim = 256
-        self.compress_p3 = nn.Conv2d(in_channels_list[0], reduced_dim, kernel_size=1)
-        self.compress_p4 = nn.Conv2d(in_channels_list[1], reduced_dim, kernel_size=1)
-        self.compress_p5 = nn.Conv2d(in_channels_list[2], reduced_dim, kernel_size=1) # Global용
+        if in_channels_list is None:
+            self.compress_p3 = nn.LazyConv2d(reduced_dim, kernel_size=1)
+            self.compress_p4 = nn.LazyConv2d(reduced_dim, kernel_size=1)
+            self.compress_p5 = nn.LazyConv2d(reduced_dim, kernel_size=1) # Global용
+        else:
+            self.compress_p3 = nn.Conv2d(in_channels_list[0], reduced_dim, kernel_size=1)
+            self.compress_p4 = nn.Conv2d(in_channels_list[1], reduced_dim, kernel_size=1)
+            self.compress_p5 = nn.Conv2d(in_channels_list[2], reduced_dim, kernel_size=1) # Global용
 
         # 2. Global Context Pooling (P5)
         self.global_pool = nn.AdaptiveAvgPool2d(1)

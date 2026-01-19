@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 import cv2
+import os
 from PIL import Image
 import torchvision.transforms as T
 
@@ -29,14 +30,17 @@ class UIInferenceEngine:
         self.backbone = UltralyticsFeatureExtractor(yolo_path, device=device)
         
         # 3. Load Bridge & Decoder
-        # 체크포인트에서 하이퍼파라미터를 로드하면 더 좋지만, 여기선 하드코딩 예시
+        # - Bridge는 P3/P4/P5 채널이 모델마다 다를 수 있어 LazyConv 기반으로 자동 적응하도록 수정됨
+        # - fusion_checkpoint가 없으면(초기 단계) 랜덤 가중치로라도 파이프라인이 끝까지 "실행"되게 둡니다.
         self.bridge = MultiScaleFusionBridge(decoder_dim=512).to(device)
-        self.decoder = UITextDecoder(vocab_size=self.vocab_size, embed_dim=512).to(device)
-        
-        # 가중치 로드
-        checkpoint = torch.load(fusion_checkpoint, map_location=device)
-        self.bridge.load_state_dict(checkpoint['bridge'])
-        self.decoder.load_state_dict(checkpoint['decoder'])
+        self.decoder = UITextDecoder(vocab_size=self.vocab_size, embed_dim=512, num_layers=4).to(device)
+
+        if fusion_checkpoint and os.path.exists(fusion_checkpoint):
+            checkpoint = torch.load(fusion_checkpoint, map_location=device)
+            self.bridge.load_state_dict(checkpoint['bridge'])
+            self.decoder.load_state_dict(checkpoint['decoder'])
+        else:
+            print(f"[WARN] fusion checkpoint not found: {fusion_checkpoint}. Running with random weights.")
         
         self.bridge.eval()
         self.decoder.eval()
@@ -61,40 +65,27 @@ class UIInferenceEngine:
             image_pil = image_input
 
         w, h = image_pil.size
-        img_tensor = self.transform(image_pil).unsqueeze(0).to(self.device) # [1, 3, 640, 640]
+
+        # "큰 그림"에서 RoIAlign은 640 좌표계를 기준으로 돌아가는게 가장 디버깅이 쉽습니다.
+        # 그래서 detection도 640x640으로 강제 resize한 이미지로 수행합니다.
+        image_640 = image_pil.resize((640, 640))
+        img_tensor = self.transform(image_640).unsqueeze(0).to(self.device) # [1, 3, 640, 640]
 
         # --- 2. Detection & Feature Extraction ---
-        # Ultralytics YOLO는 결과(Box)와 Hook된 Features를 동시에 제공
-        # model(x) 호출 시 Hook이 작동하여 self.backbone.features에 저장됨
-        results = self.backbone.yolo(image_pil, verbose=False, conf=conf_thres) 
-        
-        # Features 가져오기: [P3, P4, P5]
-        features = [
-            self.backbone.features['p3'], 
-            self.backbone.features['p4'], 
-            self.backbone.features['p5']
-        ]
+        # 2-1) Feature는 raw model forward로 추출(훅 트리거)
+        features = self.backbone(img_tensor)
+
+        # 2-2) Detection은 Ultralytics predictor 사용 (image_640는 RGB numpy로 전달)
+        det, _ = self.backbone.predict(np.array(image_640), conf=conf_thres)
 
         # Box 가져오기 (xyxy format)
         # results[0].boxes.data shape: [N, 6] (x1, y1, x2, y2, conf, cls)
-        detections = results[0].boxes.data
+        detections = det
         if len(detections) == 0:
             return []
 
-        boxes = detections[:, :4]  # [N, 4]
-        
-        # 좌표 스케일링 (Original -> 640x640)
-        # RoI Align은 Feature Map(640기반)에서 뜯어오므로, 박스도 640 스케일이어야 함
-        # Ultralytics 결과는 이미 Original Image Scale로 복원되어 나오므로,
-        # 다시 640 스케일로 줄여주는 작업이 필요하거나, 
-        # Feature Extraction 시 사용된 640 기준 좌표를 역산해야 함.
-        # 편의상 여기서는 640 scale factor를 곱한다고 가정 (비율 계산 필요)
-        scale_x = 640 / w
-        scale_y = 640 / h
-        boxes[:, 0] *= scale_x
-        boxes[:, 1] *= scale_y
-        boxes[:, 2] *= scale_x
-        boxes[:, 3] *= scale_y
+        # Detection은 image_640(640x640)에서 돌렸으므로 boxes는 이미 640 좌표계입니다.
+        boxes = detections[:, :4].to(self.device)  # [N,4]
 
         # --- 3. Description Generation (Batch Processing) ---
         results_list = []
@@ -114,7 +105,16 @@ class UIInferenceEngine:
 
         # --- 4. Result Formatting ---
         # 다시 Original 좌표로 복원된 박스를 사용 (API 출력용)
-        final_boxes = detections[:, :4].cpu().numpy().astype(int)
+        # 640 좌표 -> 원본 좌표로 역스케일링
+        sx = w / 640.0
+        sy = h / 640.0
+        final_boxes_640 = detections[:, :4].cpu().numpy()
+        final_boxes = final_boxes_640.copy()
+        final_boxes[:, 0] *= sx
+        final_boxes[:, 1] *= sy
+        final_boxes[:, 2] *= sx
+        final_boxes[:, 3] *= sy
+        final_boxes = final_boxes.astype(int)
         
         for i in range(len(final_boxes)):
             results_list.append({

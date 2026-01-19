@@ -17,8 +17,37 @@ class UITokenizer:
         if model_path and os.path.exists(model_path):
             self.load(model_path)
         else:
-            # 초기화: GPT-2 스타일의 Byte-Level BPE (한글/영어 혼용에 유리)
+            # tokenizer.json이 없으면 "추론 파이프라인부터" 돌릴 수 있게 더미 토크나이저를 만듭니다.
+            # (학습 단계에서는 train_from_json으로 반드시 재학습/저장하는 것을 권장)
             self.tokenizer = ByteLevelBPETokenizer()
+            self._init_dummy_tokenizer()
+
+    def _init_dummy_tokenizer(self):
+        """최소 동작을 위한 더미 토크나이저 학습(초기 추론 디버깅용)."""
+        special_tokens = [
+            "<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"
+        ]
+
+        dummy_texts = [
+            "settings", "home", "back", "search", "menu", "close", "save", "cart",
+            "Click", "Open", "Go back", "Open settings", "Home button",
+            "설정", "홈", "뒤로", "검색", "메뉴", "닫기", "저장", "장바구니"
+        ]
+
+        self.tokenizer.train_from_iterator(
+            dummy_texts,
+            vocab_size=max(self.vocab_size, 300),
+            min_frequency=1,
+            show_progress=False,
+            special_tokens=special_tokens,
+        )
+
+        bos_id = self.tokenizer.token_to_id("<BOS>")
+        eos_id = self.tokenizer.token_to_id("<EOS>")
+        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+            single=f"<BOS> $A <EOS>",
+            special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
+        )
 
     def train_from_json(self, json_path, save_path="tokenizer.json"):
         """
@@ -91,10 +120,7 @@ class UITokenizer:
         print(f"Tokenizer saved to {path}")
 
     def load(self, path):
-        from tokenizers import Tokenizer
-        self.tokenizer = ByteLevelBPETokenizer(vocab=path) 
-        # 주의: 로드 후에는 base Tokenizer 객체로 래핑될 수 있어 처리가 필요할 수 있음
-        # 간단하게는 아래와 같이 다시 로드
+        # tokenizer.json (tokenizers.Tokenizer format) 로드
         self.tokenizer = Tokenizer.from_file(path)
 
     @property
