@@ -1,4 +1,7 @@
 out.jpg
-inference/__pycache__/engine.cpython-310.pyc
-output_conf=0.2
-checkpoints
+output_conf=0.2/
+checkpoints/
+*.pth
+*.pt
+*.onnx
+__pycache__/
