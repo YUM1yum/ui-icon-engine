@@ -1,2 +1,3 @@
 out.jpg
 inference/__pycache__/engine.cpython-310.pyc
+output_conf=0.2
