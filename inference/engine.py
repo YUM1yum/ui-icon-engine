@@ -5,6 +5,7 @@ import cv2
 import os
 from PIL import Image
 import torchvision.transforms as T
+import time
 
 # 앞서 구현한 모듈들
 from models.yolo_v9_s import UltralyticsFeatureExtractor
@@ -14,10 +15,10 @@ from data.tokenizer import UITokenizer
 
 class UIInferenceEngine:
     def __init__(self, 
-                 yolo_path='best.pt', 
-                 fusion_checkpoint='checkpoints/fusion_best.pth', 
-                 tokenizer_path='data/ui_tokenizer.json',
-                 device='cuda'):
+            yolo_path='best.pt', 
+            fusion_checkpoint='checkpoints/fusion_best.pth', 
+            tokenizer_path='data/ui_tokenizer.json',
+            device='cuda'):
         
         self.device = device
         print(f"Initializing Engine on {device}...")
@@ -33,7 +34,7 @@ class UIInferenceEngine:
         # - Bridge는 P3/P4/P5 채널이 모델마다 다를 수 있어 LazyConv 기반으로 자동 적응하도록 수정됨
         # - fusion_checkpoint가 없으면(초기 단계) 랜덤 가중치로라도 파이프라인이 끝까지 "실행"되게 둡니다.
         self.bridge = MultiScaleFusionBridge(decoder_dim=512).to(device)
-        self.decoder = UITextDecoder(vocab_size=self.vocab_size, embed_dim=512, num_layers=4).to(device)
+        self.decoder = UITextDecoder(vocab_size=self.vocab_size, embed_dim=512, num_layers=6, num_heads=8).to(device)
 
         if fusion_checkpoint and os.path.exists(fusion_checkpoint):
             checkpoint = torch.load(fusion_checkpoint, map_location=device)
@@ -134,7 +135,7 @@ class UIInferenceEngine:
         
         # <BOS> 토큰으로 시작
         current_input = torch.full((batch_size, 1), self.tokenizer.bos_token_id, 
-                                   dtype=torch.long, device=self.device)
+                                    dtype=torch.long, device=self.device)
         
         past_key_values = None # 초기 캐시는 비어있음
         generated_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=self.device)
