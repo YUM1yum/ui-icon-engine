@@ -100,6 +100,74 @@ class UITokenizer:
 
         print(f"Tokenizer trained. Vocab size: {self.tokenizer.get_vocab_size()}")
         self.save(save_path)
+    
+    
+    def train_from_jsonl_labels(self, jsonl_path, save_path="tokenizer.json"):
+        print(f"Training tokenizer from JSONL labels: {jsonl_path}...")
+
+        def data_iterator():
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    yield str(item.get("label", ""))
+
+        special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
+
+        self.tokenizer.train_from_iterator(
+            data_iterator(),
+            vocab_size=self.vocab_size,
+            min_frequency=1,   # label은 빈도가 낮을 수 있어 1 권장
+            show_progress=True,
+            special_tokens=special_tokens
+        )
+
+        bos_id = self.tokenizer.token_to_id("<BOS>")
+        eos_id = self.tokenizer.token_to_id("<EOS>")
+
+        from tokenizers import processors
+        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+            single=f"<BOS> $A <EOS>",
+            special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
+        )
+
+        print(f"Tokenizer trained. Vocab size: {self.tokenizer.get_vocab_size()}")
+        self.save(save_path)
+
+    def train_from_jsonl(self, jsonl_path, save_path="tokenizer.json"):
+        print(f"Training tokenizer from {jsonl_path}...")
+
+        def data_iterator():
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    yield item.get("description", "")
+
+        special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
+
+        self.tokenizer.train_from_iterator(
+            data_iterator(),
+            vocab_size=self.vocab_size,
+            min_frequency=2,
+            show_progress=True,
+            special_tokens=special_tokens
+        )
+
+        bos_id = self.tokenizer.token_to_id("<BOS>")
+        eos_id = self.tokenizer.token_to_id("<EOS>")
+        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+            single=f"<BOS> $A <EOS>",
+            special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
+        )
+
+        print(f"Tokenizer trained. Vocab size: {self.tokenizer.get_vocab_size()}")
+        self.save(save_path)
+
 
     def encode(self, text):
         """
