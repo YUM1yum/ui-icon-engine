@@ -40,10 +40,27 @@ def draw_results(image, results, timing_text=None):
         )
 
     if timing_text:
-        cv2.putText(
-            vis_img, timing_text, (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.2
+        thickness = 3
+
+        (tw, th), baseline = cv2.getTextSize(timing_text, font, font_scale, thickness)
+
+        H, W = vis_img.shape[:2]
+        x = (W - tw) // 2
+        y = (H + th) // 2  # 텍스트는 baseline 기준이라 +th 쪽이 자연스러움
+
+        # (선택) 가독성용 배경 박스
+        pad = 10
+        cv2.rectangle(
+            vis_img,
+            (x - pad, y - th - pad),
+            (x + tw + pad, y + baseline + pad),
+            (0, 0, 0),
+            -1
         )
+
+        cv2.putText(vis_img, timing_text, (x, y), font, font_scale, (0, 255, 0), thickness)
     
     return vis_img
 
