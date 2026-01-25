@@ -1,3 +1,4 @@
+./cpython
 out.jpg
 output_conf=0.2/
 checkpoints/
@@ -5,3 +6,5 @@ checkpoints/
 *.pt
 *.onnx
 __pycache__/
+*.py[cod]
+*$py.class
