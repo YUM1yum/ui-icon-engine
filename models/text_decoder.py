@@ -22,7 +22,7 @@ class CausalSelfAttention(nn.Module):
         
         # Causal Mask (Register buffer to save it in state_dict)
         self.register_buffer("bias", torch.tril(torch.ones(max_len, max_len))
-                                     .view(1, 1, max_len, max_len))
+                                    .view(1, 1, max_len, max_len))
 
     def forward(self, x, past_kv=None):
         B, T, C = x.size() # Batch, Time(Seq Len), Channels
