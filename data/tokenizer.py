@@ -3,6 +3,7 @@ import os
 import json
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders, trainers, processors
 from tokenizers.implementations import ByteLevelBPETokenizer
+from tokenizers.trainers import BpeTrainer
 
 class UITokenizer:
     def __init__(self, vocab_size=5000, model_path=None):
@@ -34,13 +35,14 @@ class UITokenizer:
             "설정", "홈", "뒤로", "검색", "메뉴", "닫기", "저장", "장바구니"
         ]
 
-        self.tokenizer.train_from_iterator(
-            dummy_texts,
-            vocab_size=max(self.vocab_size, 300),
-            min_frequency=1,
-            show_progress=False,
+        trainer = BpeTrainer(
+            vocab_size=self.vocab_size,
+            min_frequency=2,
+            show_progress=True,
             special_tokens=special_tokens,
         )
+        # tokenizers 버전에 따라 train_from_iterator는 trainer= 인자만 받는 경우가 많습니다.
+        self.tokenizer.train_from_iterator(dummy_texts, trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
@@ -76,13 +78,13 @@ class UITokenizer:
 
         # 3. 학습 수행
         # min_frequency=2: 최소 2번 이상 등장한 단어만 학습
-        self.tokenizer.train_from_iterator(
-            data_iterator(),
+        trainer = BpeTrainer(
             vocab_size=self.vocab_size,
             min_frequency=2,
             show_progress=True,
-            special_tokens=special_tokens
+            special_tokens=special_tokens,
         )
+        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
         
         # 4. Post-Processor 설정 (BOS, EOS 자동 부착)
         # 인코딩 시 자동으로 문장 앞뒤에 <BOS>, <EOS>를 붙여줍니다.
