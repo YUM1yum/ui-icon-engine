@@ -4,7 +4,6 @@ checkpoints/
 *.pth
 *.pt
 *.onnx
-*/
 __pycache__/
 *.py[cod]
 *$py.class
