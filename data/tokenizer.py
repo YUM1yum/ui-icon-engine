@@ -101,9 +101,12 @@ class UITokenizer:
         print(f"Tokenizer trained. Vocab size: {self.tokenizer.get_vocab_size()}")
         self.save(save_path)
     
-    
     def train_from_jsonl_labels(self, jsonl_path, save_path="tokenizer.json"):
-        print(f"Training tokenizer from JSONL labels: {jsonl_path}...")
+        """
+        (Legacy) Train tokenizer from short icon labels.
+        NOTE: For description-generation training, prefer train_from_jsonl().
+        """
+        print(f"Training tokenizer from JSONL labels (legacy): {jsonl_path}...")
 
         def data_iterator():
             with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -112,7 +115,9 @@ class UITokenizer:
                     if not line:
                         continue
                     item = json.loads(line)
-                    yield str(item.get("label", ""))
+                    text = str(item.get("label", "")).strip()
+                    if text:
+                        yield text
 
         special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
 
@@ -137,7 +142,11 @@ class UITokenizer:
         self.save(save_path)
 
     def train_from_jsonl(self, jsonl_path, save_path="tokenizer.json"):
-        print(f"Training tokenizer from {jsonl_path}...")
+        """
+        Train tokenizer from natural-language descriptions in JSONL.
+        Expected key: "description"
+        """
+        print(f"Training tokenizer from JSONL descriptions: {jsonl_path}...")
 
         def data_iterator():
             with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -146,7 +155,9 @@ class UITokenizer:
                     if not line:
                         continue
                     item = json.loads(line)
-                    yield item.get("description", "")
+                    text = str(item.get("description", "")).strip()
+                    if text:
+                        yield text
 
         special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
 
