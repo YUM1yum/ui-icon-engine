@@ -157,7 +157,7 @@ if __name__ == "__main__":
         "vocab_path":  r"./data/ui_tokenizer.json",
         "vocab_size":  8000,
         "rebuild_tokenizer": True,
-        "train_anno":  r"C:\\Users\\dldna\\icon\\ui-icon-engine\\data\\out_icon_labels.jsonl",
+        "train_anno":  r"./data/out_icon_descriptions.jsonl",
         "train_img_dir": r".",   # jsonl에 절대경로(image)가 있으니 의미 없음
         "save_dir": r"./checkpoints",
         "batch_size": 32,
