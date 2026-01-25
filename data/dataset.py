@@ -11,10 +11,11 @@ class UIDescriptionDataset(Dataset):
     """
     JSONL format per line:
     {
-      "image": "C:\\Users\\...\\xxx.png",
-      "bbox_xyxy": [x1, y1, x2, y2],
-      "label": "download",
-      ...
+        "image": "C:\\Users\\...\\xxx.png",
+        "bbox_xyxy": [x1, y1, x2, y2],
+        "label": "download",
+        "description": "A downward arrow icon ... likely used to download.",
+        ...
     }
     Each line = one training sample (one box + one label).
     """
