@@ -41,12 +41,12 @@ class UITokenizer:
             show_progress=True,
             special_tokens=special_tokens,
         )
-        # tokenizers 버전에 따라 train_from_iterator는 trainer= 인자만 받는 경우가 많습니다.
+        # 더미 학습은 dummy_texts를 그대로 사용
         self.tokenizer.train_from_iterator(dummy_texts, trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
-        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+        self.tokenizer.post_processor = processors.TemplateProcessing(
             single=f"<BOS> $A <EOS>",
             special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
         )
@@ -92,7 +92,7 @@ class UITokenizer:
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
         
-        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+        self.tokenizer.post_processor = processors.TemplateProcessing(
             single=f"<BOS> $A <EOS>",
             special_tokens=[
                 ("<BOS>", bos_id),
@@ -130,12 +130,19 @@ class UITokenizer:
             show_progress=True,
             special_tokens=special_tokens
         )
+        trainer = BpeTrainer(
+            vocab_size=self.vocab_size,
+            min_frequency=1,   # label은 빈도가 낮을 수 있어 1 권장
+            show_progress=True,
+            special_tokens=special_tokens,
+        )
+        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
 
         from tokenizers import processors
-        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+        self.tokenizer.post_processor = processors.TemplateProcessing(
             single=f"<BOS> $A <EOS>",
             special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
         )
@@ -163,17 +170,17 @@ class UITokenizer:
 
         special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
 
-        self.tokenizer.train_from_iterator(
-            data_iterator(),
+        trainer = BpeTrainer(
             vocab_size=self.vocab_size,
             min_frequency=2,
             show_progress=True,
-            special_tokens=special_tokens
+            special_tokens=special_tokens,
         )
+        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
-        self.tokenizer._tokenizer.post_processor = processors.TemplateProcessing(
+        self.tokenizer.post_processor = processors.TemplateProcessing(
             single=f"<BOS> $A <EOS>",
             special_tokens=[("<BOS>", bos_id), ("<EOS>", eos_id)],
         )
