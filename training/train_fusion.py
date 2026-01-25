@@ -55,7 +55,11 @@ def train(cfg):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 1) Tokenizer load (먼저!)
-    tokenizer = UITokenizer(vocab_size=5000, model_path=cfg['vocab_path'])
+    tokenizer = UITokenizer(vocab_size=cfg.get('vocab_size', 5000), model_path=cfg['vocab_path'])
+    # (Optional) Rebuild tokenizer from JSONL descriptions to match description-generation objective
+    if cfg.get("rebuild_tokenizer", False):
+        # Train from JSONL descriptions (key: "description")
+        tokenizer.train_from_jsonl(cfg["train_anno"], save_path=cfg["vocab_path"])
     vocab_size = tokenizer.tokenizer.get_vocab_size()
 
     # (선택) pad_id가 0이 아닐 수도 있지만, 우리는 collate_fn에서 pad_id를 쓰므로 필수는 아님
@@ -66,7 +70,8 @@ def train(cfg):
     train_dataset = UIDescriptionDataset(
         annotation_file=cfg['train_anno'],
         img_dir=cfg['train_img_dir'],
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        max_len=cfg.get("max_len", 64),
     )
 
     dataloader = DataLoader(
@@ -150,12 +155,15 @@ if __name__ == "__main__":
     config = {
         "yolo_weight": r"./best.pt",
         "vocab_path":  r"./data/ui_tokenizer.json",
+        "vocab_size":  8000,
+        "rebuild_tokenizer": True,
         "train_anno":  r"C:\\Users\\dldna\\icon\\ui-icon-engine\\data\\out_icon_labels.jsonl",
         "train_img_dir": r".",   # jsonl에 절대경로(image)가 있으니 의미 없음
         "save_dir": r"./checkpoints",
         "batch_size": 32,
         "epochs": 10,
         "lr": 3e-4,
+        "max_len": 64,
     }
     train(config)
     # os.makedirs(config['save_dir'], exist_ok=True)
