@@ -18,7 +18,10 @@ class UIInferenceEngine:
             yolo_path='best.pt', 
             fusion_checkpoint='checkpoints/fusion_best.pth', 
             tokenizer_path='data/ui_tokenizer.json',
-            device='cuda'):
+            device='cuda',
+            max_new_tokens=64,
+            min_new_tokens=1
+            ):
         
         self.device = device
         print(f"Initializing Engine on {device}...")
@@ -46,6 +49,10 @@ class UIInferenceEngine:
         self.bridge.eval()
         self.decoder.eval()
 
+        # generation params (for description)
+        self.max_new_tokens = int(max_new_tokens)
+        self.min_new_tokens = int(min_new_tokens)
+
         # 전처리기 (YOLO 입력 사이즈 640x640 가정)
         self.transform = T.Compose([
             T.Resize((640, 640)),
@@ -53,7 +60,7 @@ class UIInferenceEngine:
         ])
 
     @torch.no_grad()
-    def process_frame(self, image_input, conf_thres=0.4):
+    def process_frame(self, image_input, conf_thres=0.4, max_new_tokens=None, min_new_tokens=None):
         """
         단일 이미지(프레임)에 대해 Detection + Description 수행
         Args:
@@ -102,7 +109,15 @@ class UIInferenceEngine:
 
         # 3-2. Decoder: Autoregressive Generation with KV Caching
         # 각 박스(N개)에 대해 병렬로 텍스트 생성
-        generated_texts = self.generate_text_batch(visual_embeds)
+        if max_new_tokens is None:
+            max_new_tokens = self.max_new_tokens
+        if min_new_tokens is None:
+            min_new_tokens = self.min_new_tokens
+        generated_texts = self.generate_text_batch(
+            visual_embeds,
+            max_new_tokens=int(max_new_tokens),
+            min_new_tokens=int(min_new_tokens),
+        )
 
         # --- 4. Result Formatting ---
         # 다시 Original 좌표로 복원된 박스를 사용 (API 출력용)
@@ -126,7 +141,7 @@ class UIInferenceEngine:
             
         return results_list
 
-    def generate_text_batch(self, visual_context, max_len=30):
+    def generate_text_batch(self, visual_context, max_new_tokens=96, min_new_tokens=8):
         """
         KV Caching이 적용된 텍스트 생성 루프
         visual_context: [N, 1, 512]
@@ -138,13 +153,15 @@ class UIInferenceEngine:
                                     dtype=torch.long, device=self.device)
         
         past_key_values = None # 초기 캐시는 비어있음
-        generated_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=self.device)
-        
+        max_new_tokens = int(max_new_tokens)
+        min_new_tokens = int(min_new_tokens)
+        generated_ids = torch.zeros((batch_size, max_new_tokens), dtype=torch.long, device=self.device)
+
         # 종료 여부 플래그
         finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
         cur_len = 0
 
-        for t in range(max_len):
+        for t in range(max_new_tokens):
             # 1. Decoder Forward (단 1개의 토큰만 입력)
             # past_key_values가 있으면 내부적으로 concat하여 연산량 절약
             logits, past_key_values = self.decoder(current_input, visual_context, past_key_values)
@@ -157,7 +174,11 @@ class UIInferenceEngine:
             generated_ids[:, t] = next_token.squeeze(-1)
             
             # 4. <EOS> 토큰 만나면 종료 플래그 설정
-            is_eos = (next_token.squeeze(-1) == self.tokenizer.eos_token_id)
+            # 너무 빨리 EOS가 나오면 빈 문장/너무 짧은 문장 위험 → 최소 길이 전에는 EOS 무시
+            if t + 1 >= min_new_tokens:
+                is_eos = (next_token.squeeze(-1) == self.tokenizer.eos_token_id)
+            else:
+                is_eos = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
             finished = finished | is_eos
             
             # 5. 다음 스텝 입력 준비
