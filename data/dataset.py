@@ -20,11 +20,12 @@ class UIDescriptionDataset(Dataset):
     Each line = one training sample (one box + one label).
     """
 
-    def __init__(self, annotation_file, img_dir=None, tokenizer=None, img_size=640):
+    def __init__(self, annotation_file, img_dir=None, tokenizer=None, img_size=640, max_len=64):
         self.annotation_file = annotation_file
         self.img_dir = img_dir  # not used if "image" is absolute
         self.tokenizer = tokenizer
         self.img_size = img_size
+        self.max_len = max_len
 
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided to UIDescriptionDataset")
@@ -64,9 +65,11 @@ class UIDescriptionDataset(Dataset):
         if bbox is None:
             raise KeyError('JSONL item must contain key "bbox_xyxy"')
 
-        label = item.get("label")
-        if label is None:
-            raise KeyError('JSONL item must contain key "label"')
+        # We train the decoder to generate natural-language descriptions (1–2 sentences).
+        # Keep "label" in JSONL for other uses, but use "description" as the training target.
+        desc = item.get("description")
+        if desc is None:
+            raise KeyError('JSONL item must contain key "description"')
 
         # --- load image ---
         img = Image.open(img_path).convert("RGB")
@@ -99,9 +102,12 @@ class UIDescriptionDataset(Dataset):
 
         bbox_tensor = torch.tensor([x1, y1, x2, y2], dtype=torch.float32)
 
-        # --- tokenize label as target text ---
-        # tokenizer.encode returns list[int]
-        token_ids = self.tokenizer.encode(label)
+        # --- tokenize description as target text ---
+        # tokenizer.encode returns list[int] including BOS/EOS (via post-processor)
+        token_ids = self.tokenizer.encode(str(desc))
+        # truncate for stability (BOS ... EOS); keep as many tokens as allowed
+        if self.max_len is not None and self.max_len > 0:
+            token_ids = token_ids[: self.max_len]
         token_tensor = torch.tensor(token_ids, dtype=torch.long)
 
         return img_resized, bbox_tensor, token_tensor
