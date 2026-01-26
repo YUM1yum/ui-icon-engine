@@ -1,4 +1,5 @@
 out.jpg
+output/
 output_conf=0.2/
 checkpoints/
 *.pth
