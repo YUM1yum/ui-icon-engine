@@ -1,8 +1,3 @@
-
-
-
-
-
 {"image": "C:/Users/dldna/icon/dataset/web-ui-600/web-ui-600/images/train/img_00001.webp", "bbox_xyxy": [518, 30, 535, 48], "yolo_cls": 0, "description": {"name": "search", "aliases_en": ["find", "look up", "query"], "action": "initiate a search", "description": "Allows users to enter a query to find specific content or information.", "app": null}, "desc_confidence": 0.9}
 {"image": "C:/Users/dldna/icon/dataset/web-ui-600/web-ui-600/images/train/img_00001.webp", "bbox_xyxy": [790, 152, 803, 165], "yolo_cls": 0, "description": {"name": "Timer", "aliases_en": ["Clock", "Stopwatch"], "action": "Track time", "description": "Used to set or monitor a specific duration for tasks or activities.", "app": null}, "desc_confidence": 0.9}
 {"image": "C:/Users/dldna/icon/dataset/web-ui-600/web-ui-600/images/train/img_00001.webp", "bbox_xyxy": [1083, 672, 1101, 689], "yolo_cls": 0, "description": {"name": "Twitter", "aliases_en": ["Tweet", "Follow"], "action": "share", "description": "Access or share content on Twitter, a social media platform.", "app": "Twitter"}, "desc_confidence": 0.9}
