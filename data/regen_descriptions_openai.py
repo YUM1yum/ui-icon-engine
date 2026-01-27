@@ -20,8 +20,8 @@ except Exception:  # pragma: no cover
 # =========================
 # Config
 # =========================
-INPUT_JSONL  = Path("out_icon_descriptions_20.jsonl")
-OUTPUT_JSONL = Path("out_icon_descriptions_openai_o_20.jsonl")
+INPUT_JSONL  = Path("out_icon_descriptions.jsonl")
+OUTPUT_JSONL = Path("out_icon_descriptions_openai.jsonl")
 
 MODEL = "gpt-4o-mini"
 # 비용만 보면 모델별 이미지 토큰 정책/계수가 달라서 “mini가 항상 더 싸다”가 아닐 수 있습니다.
