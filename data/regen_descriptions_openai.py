@@ -1,4 +1,3 @@
-import os
 import json
 import time
 import base64
@@ -8,9 +7,10 @@ from pathlib import Path
 
 from PIL import Image
 from tqdm import tqdm
+from pydantic import BaseModel
 
 from openai import OpenAI
-# 에러 타입은 SDK 버전에 따라 다를 수 있어, 없으면 Exception으로 처리
+
 try:
     from openai import RateLimitError, APIError, APITimeoutError, APIConnectionError
 except Exception:  # pragma: no cover
@@ -20,55 +20,71 @@ except Exception:  # pragma: no cover
 # =========================
 # Config
 # =========================
-INPUT_JSONL  = Path("out_icon_descriptions.jsonl")
-OUTPUT_JSONL = Path("out_icon_descriptions_openai.jsonl")
+INPUT_JSONL  = Path("out_icon_descriptions_20.jsonl")
+OUTPUT_JSONL = Path("out_icon_descriptions_openai_o_20.jsonl")
 
-MODEL = "gpt-4o-mini"   # 필요하면 "gpt-4o"로 변경
-TEMPERATURE = 0.2
-MAX_OUTPUT_TOKENS = 90  # 1~2문장 정도면 보통 60~120 사이면 충분
+MODEL = "gpt-4o-mini"
+# 비용만 보면 모델별 이미지 토큰 정책/계수가 달라서 “mini가 항상 더 싸다”가 아닐 수 있습니다.
+# 이미지 토큰은 size/detail 기반으로 과금되며(model별 상이) detail=low로 절감 가능합니다. :contentReference[oaicite:2]{index=2}
+
+TEMPERATURE = 0.0
+
+# 출력이 길어질수록 비용 증가 → 일단 타이트하게 잡고, 프롬프트로 “필요하면 길게” 허용
+MAX_OUTPUT_TOKENS = 140
 
 ICON_PAD_PX = 2
 CTX_PAD_SCALE = 2.0
 
-# 비용/지연 줄이려면 이미지 리사이즈 권장 (너무 줄이면 아이콘 디테일 손실)
-ICON_MAX_SIDE = 256
-CTX_MAX_SIDE  = 768
+# 최종 입력 해상도를 줄이는 게 이미지 토큰 절감에 직접적입니다. :contentReference[oaicite:3]{index=3}
+ICON_MAX_SIDE = 192
+CTX_MAX_SIDE  = 640
 
-# 이전 결과가 있으면 이어서 돌리기
+# detail 옵션: low는 토큰/속도 절감에 도움 :contentReference[oaicite:4]{index=4}
+ICON_DETAIL = "high"
+CTX_DETAIL  = "low"
+
+# low detail로 돌렸는데 자신감(confidence)이 낮으면 그 샘플만 high detail로 재호출(옵션)
+ENABLE_CTX_FALLBACK = True
+FALLBACK_CONF_THRESH = 0.70
+
 RESUME = True
 
-# 재시도
 MAX_RETRIES = 6
 BASE_BACKOFF_SEC = 1.5
 
 
-INSTRUCTIONS = """You label UI icons so that a user can find the right icon via natural-language commands.
+# =========================
+# Prompt (짧게 줄여서 입력 토큰도 절감)
+# =========================
+INSTRUCTIONS = """Label a UI icon so users can find it via natural-language commands.
 
-You will receive two images in this order:
-(1) ICON crop (tight)
-(2) CONTEXT crop (surrounding UI)
+Inputs: (1) ICON crop, (2) CONTEXT crop.
 
-PRIMARY GOAL (most important):
-- Decide the most common name users would call this icon (e.g., settings, search, menu, download, save, copy, share, close, back, refresh, edit, delete, add, home, profile, notification, help).
-- Prefer a single canonical label when possible.
+Return ONE-LINE minified JSON:
+{"name":string,"aliases_en":[string],"action":string,"description":string,"app":string|null,"confidence":number}
 
-SECONDARY GOAL:
-- Provide a few alternative user expressions/synonyms (include BOTH English and Korean when reasonable).
-
-You MAY:
-- Mention app/service/brand names (Chrome, Discord, VS Code, Instagram, etc.) if the context strongly suggests it.
-
-You should NOT:
-- Focus on detailed visual appearance unless it helps disambiguate between possible icon names.
-
-STRICT OUTPUT FORMAT:
-- Output exactly ONE LINE of minified JSON with keys:
-    {"name": string, "aliases": [string], "action": string, "app": string|null, "confidence": number}
-- No markdown, no extra text, no line breaks.
-- confidence must be between 0 and 1.
+Rules:
+- Focus on the most common user-facing name (settings/search/menu/download/save/copy/share/back/close/refresh/edit/delete/add/home/profile/help).
+- aliases_en must be ENGLISH ONLY (ASCII). No Korean/Chinese/etc.
+- description: meaning + typical user intent. Keep it short by default (1–2 sentences). Add detail only if needed.
+- You may mention app/brand names if clearly implied by context.
+- confidence: 0..1
+No extra text.
 """
 
-USER_TEXT = "Identify the icon’s common user-facing name and meaning using the icon crop + the UI context. Return only the one-line JSON."
+USER_TEXT = "Identify the icon’s common name and intent from the icon + UI context. Output only the JSON."
+
+
+# =========================
+# Structured output schema (프롬프트와 반드시 일치)
+# =========================
+class IconDesc(BaseModel):
+    name: str
+    aliases_en: list[str]
+    action: str
+    description: str
+    app: str | None
+    confidence: float
 
 
 # =========================
@@ -90,7 +106,7 @@ def sample_id(item: dict) -> str:
 
 
 # =========================
-# Utils: crop
+# Utils: crop / resize / encode
 # =========================
 def clamp_box_xyxy(box, W, H):
     x1, y1, x2, y2 = [int(v) for v in box]
@@ -110,11 +126,9 @@ def make_icon_and_context_crops(image: Image.Image, bbox_xyxy, icon_pad_px=2, ct
     W, H = image.size
     box = clamp_box_xyxy(bbox_xyxy, W, H)
 
-    # icon crop
     icon_box = pad_box_xyxy(box, icon_pad_px, W, H)
     icon_img = image.crop(tuple(icon_box))
 
-    # context crop
     bw = box[2] - box[0]
     bh = box[3] - box[1]
     pad = int(max(bw, bh) * ctx_pad_scale)
@@ -134,7 +148,8 @@ def resize_max_side(img: Image.Image, max_side: int) -> Image.Image:
     nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
     return img.resize((nw, nh), Image.BICUBIC)
 
-def pil_to_data_url(img: Image.Image, fmt="PNG", jpeg_quality=90) -> str:
+def pil_to_data_url(img: Image.Image, fmt="JPEG", jpeg_quality=85) -> str:
+    # 포맷/압축은 주로 전송량/속도에 영향(토큰은 보통 최종 해상도/detail에 더 좌우됨) :contentReference[oaicite:5]{index=5}
     buf = BytesIO()
     if fmt.upper() == "JPEG":
         img = img.convert("RGB")
@@ -150,35 +165,36 @@ def pil_to_data_url(img: Image.Image, fmt="PNG", jpeg_quality=90) -> str:
 # =========================
 # OpenAI call (Responses API)
 # =========================
-def call_openai_describe(client: OpenAI, icon_url: str, ctx_url: str) -> str:
-    # Responses API: 텍스트+이미지 입력을 content 배열로 넣는 형태가 공식 가이드에 있습니다. :contentReference[oaicite:4]{index=4}
-    resp = client.responses.create(
+def call_openai_describe(client: OpenAI, icon_url: str, ctx_url: str, ctx_detail: str) -> dict:
+    resp = client.responses.parse(
         model=MODEL,
-        instructions=INSTRUCTIONS,     # system/developer 역할 :contentReference[oaicite:5]{index=5}
+        instructions=INSTRUCTIONS,
         input=[{
             "role": "user",
             "content": [
                 {"type": "input_text", "text": USER_TEXT},
-                {"type": "input_image", "image_url": icon_url},
-                {"type": "input_image", "image_url": ctx_url},
+                {"type": "input_image", "image_url": icon_url, "detail": ICON_DETAIL},
+                {"type": "input_image", "image_url": ctx_url,  "detail": ctx_detail},
             ],
         }],
+        text_format=IconDesc,
         temperature=TEMPERATURE,
-        max_output_tokens=MAX_OUTPUT_TOKENS,  # 상한 파라미터 :contentReference[oaicite:6]{index=6}
+        max_output_tokens=MAX_OUTPUT_TOKENS,  # output 길이 제한은 비용 관리에 핵심 :contentReference[oaicite:6]{index=6}
     )
-    # Python SDK는 output_text로 텍스트를 편하게 꺼낼 수 있습니다. :contentReference[oaicite:7]{index=7}
-    text = (resp.output_text or "").strip()
-    # 안전장치: 여러 줄이면 마지막 줄만
-    return text.splitlines()[-1].strip()
 
+    parsed = resp.output_parsed
+    if hasattr(parsed, "model_dump"):
+        return parsed.model_dump()
+    if hasattr(parsed, "dict"):
+        return parsed.dict()
+    return dict(parsed)
 
-def call_with_retry(client: OpenAI, icon_url: str, ctx_url: str) -> str:
+def call_with_retry(client: OpenAI, icon_url: str, ctx_url: str, ctx_detail: str) -> dict:
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return call_openai_describe(client, icon_url, ctx_url)
+            return call_openai_describe(client, icon_url, ctx_url, ctx_detail=ctx_detail)
         except RateLimitError as e:
-            # 레이트리밋은 백오프로 재시도 권장 :contentReference[oaicite:8]{index=8}
             last_err = e
         except (APITimeoutError, APIConnectionError, APIError) as e:
             last_err = e
@@ -191,23 +207,44 @@ def call_with_retry(client: OpenAI, icon_url: str, ctx_url: str) -> str:
     raise RuntimeError(f"OpenAI call failed after {MAX_RETRIES} retries: {last_err}")
 
 
+def postprocess_desc(desc_obj: dict) -> tuple[dict, float]:
+    # confidence 분리 + 클램프
+    conf = float(desc_obj.get("confidence", 0.0))
+    conf = max(0.0, min(1.0, conf))
+
+    # aliases 영어(ASCII)만
+    aliases = desc_obj.get("aliases_en", [])
+    if isinstance(aliases, list):
+        aliases = [
+            a for a in aliases
+            if isinstance(a, str) and a and all(ord(c) < 128 for c in a)
+        ]
+    else:
+        aliases = []
+    desc_obj["aliases_en"] = aliases
+
+    # nested confidence 제거
+    desc_obj = {k: v for k, v in desc_obj.items() if k != "confidence"}
+    return desc_obj, conf
+
+
 # =========================
 # Main
 # =========================
 def main():
     assert INPUT_JSONL.exists(), f"Input not found: {INPUT_JSONL}"
-    client = OpenAI()  # OPENAI_API_KEY 환경변수를 사용 :contentReference[oaicite:9]{index=9}
+    client = OpenAI()
 
     done = set()
     if RESUME and OUTPUT_JSONL.exists():
-        for item in read_jsonl(OUTPUT_JSONL):
-            if "_id" in item:
-                done.add(item["_id"])
+        # 출력에 _id가 없으니, 출력 row도 sample_id로 계산해서 resume
+        for out_item in read_jsonl(OUTPUT_JSONL):
+            done.add(sample_id(out_item))
 
     with OUTPUT_JSONL.open("a", encoding="utf-8") as out_fp:
         for item in tqdm(read_jsonl(INPUT_JSONL), desc="regenerating"):
-            _id = sample_id(item)
-            if _id in done:
+            sid = sample_id(item)
+            if sid in done:
                 continue
 
             img_path = Path(item["image"])
@@ -217,31 +254,38 @@ def main():
             bbox = item["bbox_xyxy"]
             img = Image.open(img_path).convert("RGB")
 
-            box, icon_img, ctx_img = make_icon_and_context_crops(
+            _, icon_img, ctx_img = make_icon_and_context_crops(
                 img, bbox, icon_pad_px=ICON_PAD_PX, ctx_pad_scale=CTX_PAD_SCALE
             )
 
-            # 리사이즈 (토큰/비용 절감 + 속도 개선)
             icon_img = resize_max_side(icon_img, ICON_MAX_SIDE)
             ctx_img  = resize_max_side(ctx_img,  CTX_MAX_SIDE)
 
-            # data URL(base64)
-            icon_url = pil_to_data_url(icon_img, fmt="PNG")
-            ctx_url  = pil_to_data_url(ctx_img,  fmt="PNG")
+            icon_url = pil_to_data_url(icon_img, fmt="JPEG", jpeg_quality=85)
+            ctx_url  = pil_to_data_url(ctx_img,  fmt="JPEG", jpeg_quality=80)
 
-            new_desc = call_with_retry(client, icon_url, ctx_url)
+            # 1) 기본: ctx_detail=low로 시도 (비용 절감) :contentReference[oaicite:7]{index=7}
+            desc_raw = call_with_retry(client, icon_url, ctx_url, ctx_detail=CTX_DETAIL)
 
-            out = dict(item)  # 기존 필드 유지
-            out["_id"] = _id
-            out["bbox_xyxy_clamped"] = box
+            # 2) (옵션) 자신감 낮으면 그 샘플만 high로 재호출
+            if ENABLE_CTX_FALLBACK:
+                conf_try = float(desc_raw.get("confidence", 0.0))
+                if conf_try < FALLBACK_CONF_THRESH:
+                    desc_raw = call_with_retry(client, icon_url, ctx_url, ctx_detail="high")
 
-            # 기존 description 보존 + 새 description 저장
-            out["description_prev"] = item.get("description")
-            out["description"] = new_desc
-            out["description_model"] = MODEL
+            desc_obj, desc_conf = postprocess_desc(desc_raw)
+
+            out = {
+                "image": item["image"],
+                "bbox_xyxy": item["bbox_xyxy"],
+                "yolo_cls": item.get("yolo_cls", None),
+                "description": desc_obj,
+                "desc_confidence": desc_conf,
+            }
 
             write_jsonl_line(out_fp, out)
             out_fp.flush()
+            done.add(sid)
 
 
 if __name__ == "__main__":
