@@ -5,6 +5,7 @@ import os
 import time
 import glob
 from inference.engine import UIInferenceEngine
+from evaluate import evaluate_dataset
 
 
 def draw_results(image, results, timing_text=None):
@@ -146,6 +147,17 @@ def main():
         default="*.png",
         help="When --input is a folder, pattern like *.png, *.jpg, *.*",
     )
+    
+    # ---- Evaluation options ----
+    parser.add_argument("--eval", action="store_true", help="Run evaluation after inference")
+    parser.add_argument("--anno_file", type=str, default="data/val_annotations.json",
+                        help="GT annotations json (list of {image_id,bbox,description})")
+    parser.add_argument("--img_dir", type=str, default="data/images",
+                        help="Folder containing evaluation images (image_id should exist under this dir)")
+    parser.add_argument("--tau", type=float, default=0.75, help="SBERT cosine threshold τ")
+    parser.add_argument("--sbert_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
+                        help="SBERT model name for sentence embeddings")
+
     args = parser.parse_args()
 
     input_is_dir = os.path.isdir(args.input)
@@ -210,6 +222,27 @@ def main():
             max_new_tokens=args.max_new_tokens,
             min_new_tokens=args.min_new_tokens,
         )
+
+    # ---- Run evaluation at the end (optional) ----
+    if args.eval:
+        print("\n==============================")
+        print("[Eval] Running evaluation...")
+        print("==============================")
+        scores = evaluate_dataset(
+            anno_file=args.anno_file,
+            img_dir=args.img_dir,
+            engine=engine,
+            tau=args.tau,
+            sbert_model=args.sbert_model,
+            conf_thres=args.conf,
+        )
+        if scores:
+            print("\n--- Final Metrics ---")
+            for k, v in scores.items():
+                if isinstance(v, float):
+                    print(f"{k}: {v:.4f}")
+                else:
+                    print(f"{k}: {v}")
 
 if __name__ == "__main__":
     main()
