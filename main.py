@@ -6,6 +6,7 @@ import time
 import glob
 from inference.engine import UIInferenceEngine
 from evaluate import evaluate_dataset
+from utils.metrics import UIModelEvaluator
 
 
 def draw_results(image, results, timing_text=None):
