@@ -35,14 +35,19 @@ class UITokenizer:
             "설정", "홈", "뒤로", "검색", "메뉴", "닫기", "저장", "장바구니"
         ]
 
-        trainer = BpeTrainer(
+        # trainer = BpeTrainer(
+        #     vocab_size=self.vocab_size,
+        #     min_frequency=2,
+        #     show_progress=True,
+        #     special_tokens=special_tokens,
+        # )
+        # 더미 학습은 dummy_texts를 그대로 사용
+        self.tokenizer.train_from_iterator(    
+            dummy_texts,
             vocab_size=self.vocab_size,
             min_frequency=2,
-            show_progress=True,
             special_tokens=special_tokens,
-        )
-        # 더미 학습은 dummy_texts를 그대로 사용
-        self.tokenizer.train_from_iterator(dummy_texts, trainer=trainer)
+)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
@@ -78,13 +83,13 @@ class UITokenizer:
 
         # 3. 학습 수행
         # min_frequency=2: 최소 2번 이상 등장한 단어만 학습
-        trainer = BpeTrainer(
+        self.tokenizer.train_from_iterator(
+            data_iterator(),
             vocab_size=self.vocab_size,
             min_frequency=2,
             show_progress=True,
             special_tokens=special_tokens,
         )
-        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
         
         # 4. Post-Processor 설정 (BOS, EOS 자동 부착)
         # 인코딩 시 자동으로 문장 앞뒤에 <BOS>, <EOS>를 붙여줍니다.
@@ -130,13 +135,6 @@ class UITokenizer:
             show_progress=True,
             special_tokens=special_tokens
         )
-        trainer = BpeTrainer(
-            vocab_size=self.vocab_size,
-            min_frequency=1,   # label은 빈도가 낮을 수 있어 1 권장
-            show_progress=True,
-            special_tokens=special_tokens,
-        )
-        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")
@@ -170,13 +168,13 @@ class UITokenizer:
 
         special_tokens = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<ACT>", "<FUNC>", "<STAT>"]
 
-        trainer = BpeTrainer(
+        self.tokenizer.train_from_iterator(
+            data_iterator(),
             vocab_size=self.vocab_size,
             min_frequency=2,
             show_progress=True,
             special_tokens=special_tokens,
         )
-        self.tokenizer.train_from_iterator(data_iterator(), trainer=trainer)
 
         bos_id = self.tokenizer.token_to_id("<BOS>")
         eos_id = self.tokenizer.token_to_id("<EOS>")

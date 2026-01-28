@@ -154,12 +154,12 @@ def train(cfg):
 if __name__ == "__main__":
     config = {
         "yolo_weight": r"./best.pt",
-        "vocab_path":  r"./data/ui_tokenizer.json",
+        "vocab_path":  r"./data/ui_tokenizer_screenspot.json",
         "vocab_size":  8000,
         "rebuild_tokenizer": True,
-        "train_anno":  r"./data/out_icon_descriptions.jsonl",
+        "train_anno":  r"./data/screenspot_descriptions_openai.jsonl",
         "train_img_dir": r".",   # jsonl에 절대경로(image)가 있으니 의미 없음
-        "save_dir": r"./checkpoints",
+        "save_dir": r"./checkpoints_screenspot",
         "batch_size": 32,
         "epochs": 10,
         "lr": 3e-4,

@@ -30,10 +30,10 @@ except Exception:  # pragma: no cover
 # Config (match regen_descriptions_openai.py)
 # =========================
 # Your dataset paths (train split)
-IMAGES_DIR = Path(r"C:\\Users\\dldna\\icon\\dataset\\web-ui-600\\web-ui-600\\images\\train")
-LABELS_DIR = Path(r"C:\\Users\\dldna\\icon\\dataset\\web-ui-600\\web-ui-600\\labels\\train")
+IMAGES_DIR = Path(r"C:\\Users\\dldna\\icon\\dataset\\test_data_rename\\images")
+LABELS_DIR = Path(r"C:\\Users\\dldna\\icon\\dataset\\test_data_rename\\labels")
 
-OUTPUT_JSONL = Path("out_icon_descriptions_openai_from_yolo.jsonl")
+OUTPUT_JSONL = Path("our_test_data_descriptions_openai.jsonl")
 
 MODEL = "gpt-4o-mini"
 TEMPERATURE = 0.0
