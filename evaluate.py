@@ -1,129 +1,342 @@
-# 검증(Validation) 데이터셋 전체를 돌면서 점수를 뽑아냄.
-import json
+# evaluate.py
 import os
-import torch
-import cv2
-from tqdm import tqdm
-from inference.engine import UIInferenceEngine
-from utils.metrics import UIModelEvaluator
+import json
+import time
+from collections import defaultdict
 
-def evaluate_dataset(anno_file, img_dir, engine, evaluator):
-    with open(anno_file, 'r', encoding='utf-8') as f:
+import cv2
+import numpy as np
+import torch
+from tqdm import tqdm
+
+# SBERT
+from sentence_transformers import SentenceTransformer
+import torch.nn.functional as F
+
+# Optional VLM (Florence-2)
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForCausalLM
+
+
+def _is_jsonl(path: str) -> bool:
+    return path.lower().endswith(".jsonl")
+
+
+def _safe_join_img(img_dir: str, p: str) -> str:
+    # p가 절대경로면 그대로, 상대경로면 img_dir 붙임
+    if os.path.isabs(p):
+        return p
+    return os.path.join(img_dir, p) if img_dir else p
+
+
+def _extract_gt_text(desc):
+    """
+    screenspot_100_images.jsonl 예시:
+      "description": {"name":..., "action":..., "description":...}
+    """
+    if isinstance(desc, str):
+        return desc
+    if isinstance(desc, dict):
+        # 가장 짧고 안정적인 축: action > description > name
+        if desc.get("action"):
+            return str(desc["action"])
+        if desc.get("description"):
+            return str(desc["description"])
+        if desc.get("name"):
+            return str(desc["name"])
+        # fallback
+        return json.dumps(desc, ensure_ascii=False)
+    return str(desc)
+
+
+def load_annotations(anno_file: str, img_dir: str):
+    """
+    지원 포맷:
+    1) JSON: list[{image_id, bbox, description}]  (bbox는 xyxy)
+    2) JSONL: line마다 {image, bbox_xyxy, description, ...}
+    """
+    items = []
+
+    if _is_jsonl(anno_file):
+        with open(anno_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                img_path = _safe_join_img(img_dir, obj.get("image", ""))
+                box = obj.get("bbox_xyxy") or obj.get("bbox")  # xyxy 기대
+                if box is None:
+                    continue
+                gt_text = _extract_gt_text(obj.get("description", ""))
+                items.append((img_path, box, gt_text))
+        return items
+
+    # json
+    with open(anno_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    print(f"Starting evaluation on {len(data)} items...")
-    
-    # 캐싱: 동일한 이미지 내에 여러 박스가 있는 구조일 경우, 이미지를 매번 새로 읽지 않도록 최적화
-    current_img_path = ""
-    current_img_cache = None
-    
-    # Ground Truth 매칭을 위한 딕셔너리 생성 (ImageID + Box 좌표 -> Description)
-    # 주의: 좌표 오차 범위를 고려해야 하므로, 실제로는 IoU 매칭을 해야 정확하지만,
-    # 여기서는 "학습된 RoI"와 "정답 Text"의 Generation 능력만 평가하기 위해 단순화합니다.
-    # 즉, Detector 성능이 아니라 Description Generation 성능에 집중합니다.
-    
-    generated_texts = []
-    reference_texts = []
+    if isinstance(data, dict) and "data" in data:
+        data = data["data"]
 
-    for item in tqdm(data):
-        img_id = item['image_id']
-        gt_text = item['description']
-        gt_box = item['bbox'] # [x1, y1, x2, y2]
-        
-        img_path = os.path.join(img_dir, img_id)
-        
-        # 이미지 로드 (캐싱 활용)
-        if img_path != current_img_path:
-            current_img_cache = cv2.imread(img_path)
-            current_img_path = img_path
-            
-        if current_img_cache is None:
+    for obj in data:
+        img_id = obj.get("image_id") or obj.get("image") or ""
+        img_path = _safe_join_img(img_dir, img_id)
+        box = obj.get("bbox") or obj.get("bbox_xyxy")
+        if box is None:
+            continue
+        gt_text = _extract_gt_text(obj.get("description", ""))
+        items.append((img_path, box, gt_text))
+
+    return items
+
+
+def iou_xyxy(a, b) -> float:
+    ax1, ay1, ax2, ay2 = map(float, a)
+    bx1, by1, bx2, by2 = map(float, b)
+
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def crop_with_expand(img_bgr, box_xyxy, expand: float = 3.0):
+    x1, y1, x2, y2 = map(float, box_xyxy)
+    h, w = img_bgr.shape[:2]
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    bw, bh = (x2 - x1), (y2 - y1)
+    bw2, bh2 = bw * expand / 2.0, bh * expand / 2.0
+
+    nx1 = int(max(0, cx - bw2))
+    ny1 = int(max(0, cy - bh2))
+    nx2 = int(min(w, cx + bw2))
+    ny2 = int(min(h, cy + bh2))
+    if nx2 <= nx1 or ny2 <= ny1:
+        return None
+    return img_bgr[ny1:ny2, nx1:nx2]
+
+
+def bgr_to_pil(img_bgr):
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(img_rgb)
+
+
+def make_side_by_side(icon_bgr, ctx_bgr):
+    # 높이 맞춰서 가로로 붙이기
+    hi = icon_bgr.shape[0]
+    hc = ctx_bgr.shape[0]
+    target_h = max(hi, hc)
+
+    def resize_h(im, th):
+        h, w = im.shape[:2]
+        if h == th:
+            return im
+        new_w = max(1, int(w * (th / h)))
+        return cv2.resize(im, (new_w, th), interpolation=cv2.INTER_AREA)
+
+    icon_r = resize_h(icon_bgr, target_h)
+    ctx_r = resize_h(ctx_bgr, target_h)
+    return np.concatenate([icon_r, ctx_r], axis=1)
+
+
+class Florence2Captioner:
+    def __init__(self, model_name="microsoft/Florence-2-base", device="cuda"):
+        self.device = device
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if "cuda" in device else torch.float32,
+        ).to(device)
+        self.model.eval()
+
+    @torch.inference_mode()
+    def caption(self, pil_image: Image.Image, prompt: str, max_new_tokens: int = 24):
+        inputs = self.processor(text=prompt, images=pil_image, return_tensors="pt").to(self.device)
+        generated_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+        )
+        out = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return out.strip()
+
+
+def evaluate_dataset(
+    anno_file: str,
+    img_dir: str,
+    engine,
+    tau: float = 0.75,
+    sbert_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    conf_thres: float = 0.4,
+    captioner: str = "svlm",  # "svlm" | "florence2"
+    iou_thr: float = 0.5,
+    context_expand: float = 3.0,
+    vlm_model: str = "microsoft/Florence-2-base",
+    vlm_prompt: str = "Describe the UI icon and its function in a short phrase.",
+    vlm_max_new_tokens: int = 24,
+    out_jsonl: str = "",
+    limit: int = 0,  # 0이면 전체
+):
+    # 1) Load annotations
+    ann = load_annotations(anno_file, img_dir)
+    if limit and limit > 0:
+        ann = ann[:limit]
+
+    if len(ann) == 0:
+        print("[Eval] No annotations loaded.")
+        return None
+
+    # 2) Group by image
+    grouped = defaultdict(list)
+    for img_path, gt_box, gt_text in ann:
+        grouped[img_path].append((gt_box, gt_text))
+
+    img_paths = list(grouped.keys())
+    print(f"[Eval] images={len(img_paths)} | gt_items={len(ann)} | captioner={captioner}")
+
+    # 3) Init SBERT
+    sbert = SentenceTransformer(sbert_model, device=("cuda" if torch.cuda.is_available() else "cpu"))
+    sbert.eval()
+
+    # 4) Init VLM captioner (optional)
+    vlm = None
+    if captioner.lower() == "florence2":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        vlm = Florence2Captioner(model_name=vlm_model, device=device)
+
+    # 5) Metrics accumulators
+    n_gt = 0
+    n_det_hit = 0
+    ious = []
+
+    pred_texts = []
+    gt_texts = []
+
+    t_engine_ms = []
+    t_vlm_ms = []
+
+    out_f = open(out_jsonl, "w", encoding="utf-8") if out_jsonl else None
+
+    for img_path in tqdm(img_paths, desc="Eval"):
+        img = cv2.imread(img_path)
+        if img is None:
             continue
 
-        # --- Inference for specific box ---
-        # Engine의 process_frame은 전체 탐지를 수행하므로, 
-        # 특정 박스에 대한 텍스트만 얻기 위해 내부 함수를 직접 호출하거나
-        # 이미지의 해당 부분만 Crop해서 보내는 방식을 쓸 수 있습니다.
-        # 여기서는 정확한 평가를 위해 Crop 방식을 사용합니다.
-        
-        # Crop Image
-        x1, y1, x2, y2 = map(int, gt_box)
-        h, w, _ = current_img_cache.shape
-        
-        # 좌표 예외 처리
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        
-        if x2 <= x1 or y2 <= y1:
-            continue
-            
-        # Crop된 이미지를 엔진에 넣으면 -> 그 이미지를 하나의 아이콘으로 인식하고 설명 생성
-        # (주의: 이 경우 P5 Global Context가 소실될 수 있으므로, 
-        #  엄밀한 평가는 Engine 내부에 Force Box 모드를 추가해야 함. 
-        #  일단 간편한 Crop 방식으로 구현)
-        # crop_img = current_img_cache[y1:y2, x1:x2]
-        
-        # [Better Approach] 전체 이미지를 넣되, Engine이 우리가 원하는 Box만 설명하도록 수정하는 것은 복잡함.
-        # 따라서 여기서는 Engine.process_frame 결과 중 IoU가 가장 높은 박스의 텍스트를 가져옴.
-        
-        results = engine.process_frame(current_img_cache, conf_thres=0.1)
-        
-        # 매칭 찾기 (IoU 기반)
-        best_iou = 0
-        best_desc = ""
-        
-        gt_area = (x2 - x1) * (y2 - y1)
-        
-        for res in results:
-            rx1, ry1, rx2, ry2 = res['box']
-            
-            # IoU 계산
-            ix1 = max(x1, rx1); iy1 = max(y1, ry1)
-            ix2 = min(x2, rx2); iy2 = min(y2, ry2)
-            inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-            
-            res_area = (rx2 - rx1) * (ry2 - ry1)
-            union_area = gt_area + res_area - inter_area
-            
-            if union_area > 0:
-                iou = inter_area / union_area
-                if iou > best_iou:
-                    best_iou = iou
-                    best_desc = res['description']
-        
-        # IoU가 0.5 이상인 매칭된 결과가 있을 때만 평가
-        if best_iou > 0.5:
-            generated_texts.append(best_desc)
-            reference_texts.append(gt_text)
+        # engine 1회
+        t0 = time.perf_counter()
+        results = engine.process_frame(img, conf_thres=conf_thres)
+        t1 = time.perf_counter()
+        t_engine_ms.append((t1 - t0) * 1000.0)
 
-    # 점수 계산
-    if generated_texts:
-        evaluator.update(generated_texts, reference_texts)
-        scores = evaluator.compute()
-        print("\n--- Evaluation Results ---")
-        print(f"Tested Samples: {len(generated_texts)}")
-        print(f"BLEU-4: {scores['BLEU-4']:.4f}")
-        print(f"ROUGE-L: {scores['ROUGE-L']:.4f}")
-    else:
-        print("No valid matches found for evaluation.")
+        # predicted boxes / texts
+        pred_boxes = []
+        pred_svlm_text = []
+        for r in results:
+            pred_boxes.append(r["box"])
+            pred_svlm_text.append(r.get("description", ""))
 
-if __name__ == "__main__":
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    # 엔진 로드
-    engine = UIInferenceEngine(
-        yolo_path='best.pt',
-        fusion_checkpoint='checkpoints/fusion_best.pth',
-        device=device
-    )
-    
-    # 평가기 로드
-    evaluator = UIModelEvaluator(device=device)
-    
-    # 실행
-    evaluate_dataset(
-        anno_file='data/val_annotations.json',
-        img_dir='data/images',
-        engine=engine,
-        evaluator=evaluator
-    )
+        # VLM captions: pred box마다 1회만 (캐시)
+        pred_vlm_text = [""] * len(pred_boxes)
+        if vlm is not None and len(pred_boxes) > 0:
+            for i, box in enumerate(pred_boxes):
+                icon = crop_with_expand(img, box, expand=1.0)
+                if icon is None:
+                    continue
+                ctx = crop_with_expand(img, box, expand=context_expand)
+                if ctx is None:
+                    ctx = icon
+                combo = make_side_by_side(icon, ctx)
+
+                pil = bgr_to_pil(combo)
+
+                tv0 = time.perf_counter()
+                txt = vlm.caption(pil, prompt=vlm_prompt, max_new_tokens=vlm_max_new_tokens)
+                tv1 = time.perf_counter()
+                t_vlm_ms.append((tv1 - tv0) * 1000.0)
+
+                pred_vlm_text[i] = txt
+
+        # match each GT to best predicted
+        for gt_box, gt_text in grouped[img_path]:
+            n_gt += 1
+            best_iou = 0.0
+            best_idx = -1
+            for i, pb in enumerate(pred_boxes):
+                v = iou_xyxy(gt_box, pb)
+                if v > best_iou:
+                    best_iou = v
+                    best_idx = i
+
+            ious.append(best_iou)
+
+            if best_iou >= iou_thr and best_idx >= 0:
+                n_det_hit += 1
+                if captioner.lower() == "florence2":
+                    pred = pred_vlm_text[best_idx]
+                else:
+                    pred = pred_svlm_text[best_idx]
+
+                pred_texts.append(pred)
+                gt_texts.append(gt_text)
+
+                if out_f:
+                    out_obj = {
+                        "image": img_path,
+                        "gt_box": gt_box,
+                        "gt_text": gt_text,
+                        "pred_box": pred_boxes[best_idx],
+                        "pred_text": pred,
+                        "iou": float(best_iou),
+                        "captioner": captioner,
+                    }
+                    out_f.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
+
+    if out_f:
+        out_f.close()
+
+    # 6) Compute SBERT similarities (only matched)
+    desc_acc = 0
+    mean_sim = 0.0
+    if len(pred_texts) > 0:
+        with torch.inference_mode():
+            # batch encode
+            emb_p = sbert.encode(pred_texts, convert_to_tensor=True, normalize_embeddings=True)
+            emb_g = sbert.encode(gt_texts, convert_to_tensor=True, normalize_embeddings=True)
+            sims = (emb_p * emb_g).sum(dim=1)  # cosine (normalized)
+            mean_sim = float(sims.mean().item())
+            desc_acc = int((sims >= tau).sum().item())
+            desc_acc = desc_acc / len(pred_texts)
+
+    det_recall = (n_det_hit / n_gt) if n_gt > 0 else 0.0
+    mean_iou = float(np.mean(ious)) if len(ious) > 0 else 0.0
+
+    scores = {
+        "n_images": len(img_paths),
+        "n_gt": n_gt,
+        "det_recall@iou": det_recall,
+        "mean_iou": mean_iou,
+        "n_matched": len(pred_texts),
+        "desc_acc@tau": float(desc_acc),
+        "desc_mean_sbert": float(mean_sim),
+        "engine_ms_per_image": float(np.mean(t_engine_ms)) if t_engine_ms else 0.0,
+        "vlm_ms_per_icon": float(np.mean(t_vlm_ms)) if t_vlm_ms else 0.0,
+        "captioner": captioner,
+        "tau": float(tau),
+        "iou_thr": float(iou_thr),
+    }
+
+    print("\n--- Eval Results ---")
+    for k, v in scores.items():
+        if isinstance(v, float):
+            print(f"{k}: {v:.4f}")
+        else:
+            print(f"{k}: {v}")
+
+    return scores
