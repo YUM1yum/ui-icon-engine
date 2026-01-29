@@ -4,9 +4,9 @@ import torch
 import os
 import time
 import glob
+
 from inference.engine import UIInferenceEngine
 from evaluate import evaluate_dataset
-from utils.metrics import UIModelEvaluator
 
 
 def draw_results(image, results, timing_text=None):
@@ -68,7 +68,6 @@ def draw_results(image, results, timing_text=None):
 
 
 def list_images(folder: str, pattern: str):
-    # glob 결과 중 이미지 확장자만 필터
     exts = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
     paths = glob.glob(os.path.join(folder, pattern))
     paths = [p for p in paths if os.path.splitext(p)[1].lower() in exts]
@@ -81,7 +80,8 @@ def ensure_dir(path: str):
         os.makedirs(path, exist_ok=True)
 
 
-def process_one_image(engine, img_path: str, out_path: str, conf_thres: float, max_new_tokens: int, min_new_tokens: int):
+def process_one_image(engine, img_path: str, out_path: str,
+                      conf_thres: float, max_new_tokens: int, min_new_tokens: int):
     """
     이미지 1장 처리 + (read, infer, read+infer, read+infer+save) 타이밍 출력
     draw(그리기) 시간은 제외
@@ -109,7 +109,6 @@ def process_one_image(engine, img_path: str, out_path: str, conf_thres: float, m
     t_inf1 = time.perf_counter()
     infer_ms = (t_inf1 - t_inf0) * 1000.0
 
-    # draw는 시간에서 제외 (하지만 결과 저장을 위해 이미지는 그려야 함)
     timing_text = f"read {read_ms:.1f} ms | infer {infer_ms:.1f} ms | n={len(results)}"
     vis_img = draw_results(img, results, timing_text=timing_text)
 
@@ -124,40 +123,59 @@ def process_one_image(engine, img_path: str, out_path: str, conf_thres: float, m
 
     if not ok:
         print(f"  - save failed: {out_path}")
-        print(f"[Time] read: {read_ms:.1f} ms | infer: {infer_ms:.1f} ms | read+infer: {read_infer_ms:.1f} ms | read+infer+save: {read_infer_save_ms:.1f} ms")
+        print(f"[Time] read: {read_ms:.1f} ms | infer: {infer_ms:.1f} ms | "
+              f"read+infer: {read_infer_ms:.1f} ms | read+infer+save: {read_infer_save_ms:.1f} ms")
         return False
 
     print(f"  - saved: {out_path}")
-    print(f"[Time] read: {read_ms:.1f} ms | infer: {infer_ms:.1f} ms | read+infer: {read_infer_ms:.1f} ms | read+infer+save: {read_infer_save_ms:.1f} ms")
+    print(f"[Time] read: {read_ms:.1f} ms | infer: {infer_ms:.1f} ms | "
+          f"read+infer: {read_infer_ms:.1f} ms | read+infer+save: {read_infer_save_ms:.1f} ms")
     return True
 
 
 def main():
     parser = argparse.ArgumentParser(description="UI Icon Detection & Description Engine")
+
+    # ---- Inference I/O ----
     parser.add_argument("--input", type=str, required=True, help="Path to input image OR folder")
-    parser.add_argument("--output", type=str, default="output.jpg", help="Output file (single) OR output folder (dir input)")
+    parser.add_argument("--output", type=str, default="output.jpg",
+                        help="Output file (single) OR output folder (dir input)")
+    parser.add_argument("--glob", type=str, default="*.png",
+                        help="When --input is a folder, pattern like *.png, *.jpg, *.*")
+
+    # ---- Model paths ----
     parser.add_argument("--yolo_path", type=str, default="best.pt", help="YOLO weights path")
     parser.add_argument("--fusion_path", type=str, default="checkpoints/fusion_best.pth", help="Fusion model weights")
     parser.add_argument("--tokenizer_path", type=str, default="data/ui_tokenizer.json", help="Tokenizer json path")
+
+    # ---- Inference options ----
     parser.add_argument("--conf", type=float, default=0.4, help="Detection confidence threshold")
     parser.add_argument("--max_new_tokens", type=int, default=64, help="Max tokens to generate per icon (description)")
     parser.add_argument("--min_new_tokens", type=int, default=1, help="Min tokens before allowing EOS")
-    parser.add_argument(
-        "--glob",
-        type=str,
-        default="*.png",
-        help="When --input is a folder, pattern like *.png, *.jpg, *.*",
-    )
-    
+
     # ---- Evaluation options ----
     parser.add_argument("--eval", action="store_true", help="Run evaluation after inference")
     parser.add_argument("--anno_file", type=str, default="data/val_annotations.json",
-                        help="GT annotations json (list of {image_id,bbox,description})")
+                        help="GT annotations json/jsonl")
     parser.add_argument("--img_dir", type=str, default="data/images",
-                        help="Folder containing evaluation images (image_id should exist under this dir)")
+                        help="Folder containing evaluation images (if anno has relative paths)")
     parser.add_argument("--tau", type=float, default=0.75, help="SBERT cosine threshold τ")
     parser.add_argument("--sbert_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
                         help="SBERT model name for sentence embeddings")
+
+    # ---- Baseline captioner options (svlm vs VLM) ----
+    parser.add_argument("--eval_captioner", type=str, default="svlm",
+                        choices=["svlm", "florence2"],
+                        help="Captioner for evaluation: svlm (yours) or florence2 (VLM baseline)")
+    parser.add_argument("--eval_iou_thr", type=float, default=0.5, help="IoU threshold for GT-match")
+    parser.add_argument("--eval_context_expand", type=float, default=3.0, help="Context crop expand ratio")
+    parser.add_argument("--eval_vlm_model", type=str, default="microsoft/Florence-2-base", help="VLM model name")
+    parser.add_argument("--eval_vlm_prompt", type=str,
+                        default="Describe the UI icon and its function in a short phrase.",
+                        help="Prompt for VLM captioning")
+    parser.add_argument("--eval_vlm_max_new_tokens", type=int, default=24, help="VLM max_new_tokens")
+    parser.add_argument("--eval_out_jsonl", type=str, default="", help="Optional: write per-sample outputs to jsonl")
+    parser.add_argument("--eval_limit", type=int, default=0, help="0=all, else limit number of GT items")
 
     args = parser.parse_args()
 
@@ -175,11 +193,12 @@ def main():
         max_new_tokens=args.max_new_tokens,
         min_new_tokens=args.min_new_tokens,
     )
+
     t_init1 = time.perf_counter()
     print(f"[Time] init engine: {(t_init1 - t_init0) * 1000:.1f} ms  (device={device})")
 
+    # 2) Inference (single / folder)
     if input_is_dir:
-        # input folder -> output folder
         in_dir = args.input
         out_dir = args.output
         ensure_dir(out_dir)
@@ -207,9 +226,7 @@ def main():
             total_saved += int(ok)
 
         print(f"\nDone. Saved {total_saved}/{len(img_paths)} images.")
-
     else:
-        # single file -> output file
         if not os.path.exists(args.input):
             print(f"Error: Image not found at {args.input}")
             return
@@ -224,11 +241,12 @@ def main():
             min_new_tokens=args.min_new_tokens,
         )
 
-    # ---- Run evaluation at the end (optional) ----
+    # 3) Evaluation (optional)
     if args.eval:
         print("\n==============================")
         print("[Eval] Running evaluation...")
         print("==============================")
+
         scores = evaluate_dataset(
             anno_file=args.anno_file,
             img_dir=args.img_dir,
@@ -236,7 +254,16 @@ def main():
             tau=args.tau,
             sbert_model=args.sbert_model,
             conf_thres=args.conf,
+            captioner=args.eval_captioner,
+            iou_thr=args.eval_iou_thr,
+            context_expand=args.eval_context_expand,
+            vlm_model=args.eval_vlm_model,
+            vlm_prompt=args.eval_vlm_prompt,
+            vlm_max_new_tokens=args.eval_vlm_max_new_tokens,
+            out_jsonl=args.eval_out_jsonl,
+            limit=args.eval_limit,
         )
+
         if scores:
             print("\n--- Final Metrics ---")
             for k, v in scores.items():
@@ -244,6 +271,7 @@ def main():
                     print(f"{k}: {v:.4f}")
                 else:
                     print(f"{k}: {v}")
+
 
 if __name__ == "__main__":
     main()
