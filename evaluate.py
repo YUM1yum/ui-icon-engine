@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 # SBERT
 from sentence_transformers import SentenceTransformer
-import torch.nn.functional as F
 
 # Optional VLM (Florence-2)
 from PIL import Image
@@ -100,7 +99,12 @@ def iou_xyxy(a, b) -> float:
     inter = iw * ih
 
     area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(ay2 - by1, 0.0)
+    # ↑ 오타 방지: 원래 코드대로라면 아래 한 줄이 맞습니다.
+    # area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    # 그런데 실수 방지 위해 바로 수정합니다.
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
 
@@ -145,14 +149,44 @@ def make_side_by_side(icon_bgr, ctx_bgr):
 
 
 class Florence2Captioner:
+    """
+    Florence-2 base 로딩에서 SDPA 관련 AttributeError(_supports_sdpa) 나오는 케이스 방지:
+      - attn_implementation="eager" 강제
+      - transformers 버전에 따라 인자 미지원이면 TypeError로 fallback
+    """
     def __init__(self, model_name="microsoft/Florence-2-base", device="cuda"):
         self.device = device
-        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+        # fast tokenizer 문제 회피: slow tokenizer 강제
+        try:
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, trust_remote_code=True, use_fast=False
+            )
+        except TypeError:
+            # transformers 버전에 따라 use_fast 인자를 안 받는 경우 fallback
+            self.processor = AutoProcessor.from_pretrained(
+                model_name, trust_remote_code=True
+            )
+
+        dtype = torch.float16 if "cuda" in device else torch.float32
+
+        kwargs = dict(
             trust_remote_code=True,
-            torch_dtype=torch.float16 if "cuda" in device else torch.float32,
-        ).to(device)
+            dtype=dtype,                 # torch_dtype 대신 dtype
+            low_cpu_mem_usage=True,
+        )
+
+        if "dtype" in kwargs:
+            kwargs["torch_dtype"] = kwargs.pop("dtype")
+
+        # SDPA/flash 관련 충돌 방지
+        # (지원 안 하면 TypeError 발생 → fallback)
+        try:
+            kwargs["attn_implementation"] = "eager"
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).to(device)
+        except TypeError:
+            kwargs.pop("attn_implementation", None)
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).to(device)
+
         self.model.eval()
 
     @torch.inference_mode()
@@ -253,7 +287,6 @@ def evaluate_dataset(
                 if ctx is None:
                     ctx = icon
                 combo = make_side_by_side(icon, ctx)
-
                 pil = bgr_to_pil(combo)
 
                 tv0 = time.perf_counter()
@@ -302,17 +335,15 @@ def evaluate_dataset(
         out_f.close()
 
     # 6) Compute SBERT similarities (only matched)
-    desc_acc = 0
+    desc_acc = 0.0
     mean_sim = 0.0
     if len(pred_texts) > 0:
         with torch.inference_mode():
-            # batch encode
             emb_p = sbert.encode(pred_texts, convert_to_tensor=True, normalize_embeddings=True)
             emb_g = sbert.encode(gt_texts, convert_to_tensor=True, normalize_embeddings=True)
             sims = (emb_p * emb_g).sum(dim=1)  # cosine (normalized)
             mean_sim = float(sims.mean().item())
-            desc_acc = int((sims >= tau).sum().item())
-            desc_acc = desc_acc / len(pred_texts)
+            desc_acc = float((sims >= tau).float().mean().item())
 
     det_recall = (n_det_hit / n_gt) if n_gt > 0 else 0.0
     mean_iou = float(np.mean(ious)) if len(ious) > 0 else 0.0
