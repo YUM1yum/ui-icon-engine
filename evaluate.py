@@ -3,7 +3,6 @@ import os
 import json
 import time
 from collections import defaultdict
-
 import cv2
 import numpy as np
 import torch
